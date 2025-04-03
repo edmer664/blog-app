@@ -1,7 +1,7 @@
 # Docs for the Azure Web Apps Deploy action: https://github.com/Azure/webapps-deploy
 # More GitHub Actions for Azure: https://github.com/Azure/actions
 
-name: Build and deploy Node.js app to Azure Web App - edmers-app01
+name: Build and deploy Next.js app to Azure Web App - edmers-app01
 
 on:
   push:
@@ -14,28 +14,102 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read #This is required for actions/checkout
-
+    
     steps:
       - uses: actions/checkout@v4
-
+      
       - name: Set up Node.js version
         uses: actions/setup-node@v3
         with:
           node-version: '20.x'
-
-      - name: npm install, build, and test
+          cache: 'npm'
+      
+      - name: npm install and build
         run: |
           npm install
-          npm run build --if-present
+          npm run build
           npm run test --if-present
-
-      - name: Zip artifact for deployment
-        run: zip release.zip ./* -r
-
+      
+      - name: Prepare Next.js deployment package
+        run: |
+          # Create a directory for the deployment files
+          mkdir deployment
+          
+          # Copy necessary files for Next.js to run in production
+          cp -r .next deployment/
+          cp -r public deployment/ 2>/dev/null || :
+          cp package.json package-lock.json deployment/
+          cp next.config.js deployment/ 2>/dev/null || :
+          
+          # Create a server.js file that Azure can use as an entry point
+          cat > deployment/server.js << 'EOL'
+          const { createServer } = require("http");
+          const { parse } = require("url");
+          const next = require("next");
+          
+          const dev = process.env.NODE_ENV !== "production";
+          const app = next({ dev });
+          const handle = app.getRequestHandler();
+          const port = process.env.PORT || 8080;
+          
+          app.prepare().then(() => {
+            createServer((req, res) => {
+              const parsedUrl = parse(req.url, true);
+              handle(req, res, parsedUrl);
+            }).listen(port, (err) => {
+              if (err) throw err;
+              console.log(`> Ready on http://localhost:${port}`);
+            });
+          });
+          EOL
+          
+          # Create a web.config file for IIS
+          cat > deployment/web.config << 'EOL'
+          <?xml version="1.0" encoding="utf-8"?>
+          <configuration>
+            <system.webServer>
+              <handlers>
+                <add name="iisnode" path="server.js" verb="*" modules="iisnode" />
+              </handlers>
+              <rewrite>
+                <rules>
+                  <rule name="NextJS">
+                    <match url="/*" />
+                    <action type="Rewrite" url="server.js" />
+                  </rule>
+                </rules>
+              </rewrite>
+            </system.webServer>
+          </configuration>
+          EOL
+          
+          # Add an iisnode.yml file to configure Node.js
+          cat > deployment/iisnode.yml << 'EOL'
+          nodeProcessCommandLine: "node"
+          EOL
+          
+          # Create a startup script for npm install
+          cat > deployment/startup.sh << 'EOL'
+          #!/bin/bash
+          npm install --production
+          node server.js
+          EOL
+          chmod +x deployment/startup.sh
+          
+          # Create a .deployment file for Azure
+          cat > deployment/.deployment << 'EOL'
+          [config]
+          SCM_DO_BUILD_DURING_DEPLOYMENT=false
+          EOL
+          
+          # Zip only the deployment directory
+          cd deployment
+          zip -r ../release.zip ./*
+      
       - name: Upload artifact for deployment job
         uses: actions/upload-artifact@v4
         with:
-          name: node-app
+          name: nextjs-app
           path: release.zip
 
   deploy:
@@ -47,13 +121,13 @@ jobs:
     permissions:
       id-token: write #This is required for requesting the JWT
       contents: read #This is required for actions/checkout
-
+    
     steps:
       - name: Download artifact from build job
         uses: actions/download-artifact@v4
         with:
-          name: node-app
-
+          name: nextjs-app
+      
       - name: Unzip artifact for deployment
         run: unzip release.zip
       
@@ -63,7 +137,7 @@ jobs:
           client-id: ${{ secrets.AZUREAPPSERVICE_CLIENTID_3257033C532C4A759A34FB40E16541D8 }}
           tenant-id: ${{ secrets.AZUREAPPSERVICE_TENANTID_1CDC85B00ADC4C9AB5C16498EA55C969 }}
           subscription-id: ${{ secrets.AZUREAPPSERVICE_SUBSCRIPTIONID_F99A357D32014D7BAE487F29F4A2A9FB }}
-
+      
       - name: 'Deploy to Azure Web App'
         id: deploy-to-webapp
         uses: azure/webapps-deploy@v3
@@ -71,4 +145,3 @@ jobs:
           app-name: 'edmers-app01'
           slot-name: 'Production'
           package: .
-          
